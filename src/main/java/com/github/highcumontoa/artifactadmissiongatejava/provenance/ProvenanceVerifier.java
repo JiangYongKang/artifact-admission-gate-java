@@ -2,9 +2,9 @@ package com.github.highcumontoa.artifactadmissiongatejava.provenance;
 
 import com.github.highcumontoa.artifactadmissiongatejava.model.ProvenanceStatement;
 import com.github.highcumontoa.artifactadmissiongatejava.model.RejectReason;
+import com.github.highcumontoa.artifactadmissiongatejava.governance.GovernanceSnapshot;
 import com.github.highcumontoa.artifactadmissiongatejava.trust.CryptoSupport;
 import com.github.highcumontoa.artifactadmissiongatejava.trust.TrustedKey;
-import com.github.highcumontoa.artifactadmissiongatejava.trust.TrustStore;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -13,7 +13,7 @@ import java.util.Optional;
 
 /**
  * 来源证明校验：绑定性（摘要与制品标识）与证明签名可信性。
- * 判定结果仅含原因分类与说明，不含密钥材料。
+ * 密钥状态一律取自请求开始时拿到的治理快照，判定结果仅含原因分类与说明，不含密钥材料。
  */
 public class ProvenanceVerifier {
 
@@ -36,9 +36,9 @@ public class ProvenanceVerifier {
         return new Outcome(null, "provenance bound to artifact");
     }
 
-    /** 校验证明签名及其密钥在信任库中的状态。 */
-    public Outcome checkSignature(ProvenanceStatement provenance, TrustStore trustStore, Instant now) {
-        Optional<TrustedKey> key = trustStore.find(provenance.signerKeyId());
+    /** 校验证明签名及其密钥在治理快照中的状态。 */
+    public Outcome checkSignature(ProvenanceStatement provenance, GovernanceSnapshot snapshot, Instant now) {
+        Optional<TrustedKey> key = snapshot.findKey(provenance.signerKeyId());
         if (key.isEmpty()) {
             return new Outcome(RejectReason.PROVENANCE_UNTRUSTED,
                     "provenance signer key not in trust store: " + provenance.signerKeyId());

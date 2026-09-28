@@ -1,6 +1,7 @@
 package com.github.highcumontoa.artifactadmissiongatejava.support;
 
 import com.github.highcumontoa.artifactadmissiongatejava.model.AdmissionRequest;
+import com.github.highcumontoa.artifactadmissiongatejava.model.ComponentManifest;
 import com.github.highcumontoa.artifactadmissiongatejava.model.ProvenanceStatement;
 import com.github.highcumontoa.artifactadmissiongatejava.trust.CryptoSupport;
 import com.github.highcumontoa.artifactadmissiongatejava.trust.KeyState;
@@ -14,6 +15,7 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 
 /** 测试支撑：本地生成 Ed25519 密钥与签名，不依赖任何外部服务或真实凭据。 */
@@ -66,5 +68,15 @@ public final class TestFixtures {
         String signature = sign(provenanceKey.getPrivate(), unsigned.canonicalPayload());
         return new ProvenanceStatement(statementId, artifactId, digest, builderId,
                 issuedAt, provenanceKeyId, signature);
+    }
+
+    /** 为给定制品构造一份绑定正确、包含给定组件的成分清单。 */
+    public static ComponentManifest manifest(String artifactId, String digest,
+                                             List<ComponentManifest.Component> components) {
+        return new ComponentManifest("sbom-" + UUID.randomUUID(), artifactId, digest, List.copyOf(components));
+    }
+
+    public static ComponentManifest.Component component(String name, String version) {
+        return new ComponentManifest.Component(name, version);
     }
 }

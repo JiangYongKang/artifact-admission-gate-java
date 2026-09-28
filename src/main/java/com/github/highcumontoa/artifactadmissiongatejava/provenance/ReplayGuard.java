@@ -1,26 +1,32 @@
 package com.github.highcumontoa.artifactadmissiongatejava.provenance;
 
-import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 重放防护：记录已被消费的证明标识。
- * 同一证明重复提交不会产生新结论，也无法绕过已生效的撤销/拒绝。
+ * 重放防护：记录每条证明（statementId）首次归属的请求哈希。
+ *
+ * 同一 statementId 再次出现时：
+ * - 若就是原请求本身的复核提交，属主一致，走正常的配置复核流程；
+ * - 若被挪到别的请求/制品上，属主不一致，直接归到原本那条结论，
+ *   既不会产生新的准入记录，也不会凭空放行。
  */
 public class ReplayGuard {
 
-    private final Set<String> consumedStatementIds = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, String> ownerByStatementId = new ConcurrentHashMap<>();
 
     /**
-     * 尝试消费一个证明标识。
+     * 声明证明属主；若该证明已被占用，返回既有属主请求哈希，当前状态不变。
      *
-     * @return true 表示首次提交；false 表示重放
+     * @return 该证明最终的属主请求哈希
      */
-    public boolean tryConsume(String statementId) {
-        return consumedStatementIds.add(statementId);
+    public String claim(String statementId, String requestHash) {
+        return ownerByStatementId.putIfAbsent(statementId, requestHash) == null
+                ? requestHash
+                : ownerByStatementId.get(statementId);
     }
 
-    public boolean isConsumed(String statementId) {
-        return consumedStatementIds.contains(statementId);
+    public Optional<String> ownerOf(String statementId) {
+        return Optional.ofNullable(ownerByStatementId.get(statementId));
     }
 }

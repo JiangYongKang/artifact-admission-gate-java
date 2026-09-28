@@ -5,14 +5,15 @@ import com.github.highcumontoa.artifactadmissiongatejava.model.AdmissionRequest;
 import com.github.highcumontoa.artifactadmissiongatejava.model.AdmissionStatus;
 import com.github.highcumontoa.artifactadmissiongatejava.model.ProvenanceStatement;
 import com.github.highcumontoa.artifactadmissiongatejava.model.RejectReason;
+import com.github.highcumontoa.artifactadmissiongatejava.governance.GovernanceRegistry;
 import com.github.highcumontoa.artifactadmissiongatejava.policy.PolicyEngine;
 import com.github.highcumontoa.artifactadmissiongatejava.policy.TrustPolicy;
 import com.github.highcumontoa.artifactadmissiongatejava.provenance.ProvenanceVerifier;
 import com.github.highcumontoa.artifactadmissiongatejava.provenance.ReplayGuard;
+import com.github.highcumontoa.artifactadmissiongatejava.sbom.ManifestVerifier;
 import com.github.highcumontoa.artifactadmissiongatejava.service.AdmissionService;
 import com.github.highcumontoa.artifactadmissiongatejava.store.AdmissionStore;
 import com.github.highcumontoa.artifactadmissiongatejava.support.TestFixtures;
-import com.github.highcumontoa.artifactadmissiongatejava.trust.TrustStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -48,27 +49,28 @@ class AdmissionServiceTest {
 
     private KeyPair artifactKey;
     private KeyPair provenanceKey;
-    private TrustStore trustStore;
-    private PolicyEngine policyEngine;
+    private GovernanceRegistry governance;
+    private AdmissionStore store;
     private AdmissionService service;
 
     @BeforeEach
     void setUp() {
         artifactKey = TestFixtures.generateKeyPair();
         provenanceKey = TestFixtures.generateKeyPair();
-        trustStore = new TrustStore();
-        trustStore.register(TestFixtures.trustedKey(ARTIFACT_KEY_ID, artifactKey));
-        trustStore.register(TestFixtures.trustedKey(PROVENANCE_KEY_ID, provenanceKey));
-        policyEngine = new PolicyEngine();
-        policyEngine.setPolicies(List.of(new TrustPolicy(
+        governance = new GovernanceRegistry();
+        governance.registerKey(TestFixtures.trustedKey(ARTIFACT_KEY_ID, artifactKey));
+        governance.registerKey(TestFixtures.trustedKey(PROVENANCE_KEY_ID, provenanceKey));
+        governance.seedPolicies(List.of(new TrustPolicy(
                 "default-policy", 10, "com\\.example\\..*",
                 List.of(ARTIFACT_KEY_ID), List.of(BUILDER_ID), true)));
-        service = newService(policyEngine, 100, 5000);
+        store = new AdmissionStore();
+        service = newService(governance, store, 100, 5000);
     }
 
-    private AdmissionService newService(PolicyEngine engine, int maxBatch, long maxDurationMs) {
-        return new AdmissionService(new AdmissionStore(), trustStore, engine,
-                new ProvenanceVerifier(), new ReplayGuard(),
+    private AdmissionService newService(GovernanceRegistry registry, AdmissionStore admissionStore,
+                                        int maxBatch, long maxDurationMs) {
+        return new AdmissionService(admissionStore, registry, new PolicyEngine(),
+                new ProvenanceVerifier(), new ManifestVerifier(), new ReplayGuard(),
                 Clock.fixed(Instant.now(), ZoneOffset.UTC), maxBatch, maxDurationMs);
     }
 
@@ -157,7 +159,7 @@ class AdmissionServiceTest {
     @Test
     void revokedKeyIsRejected() {
         AdmissionRequest request = validRequest();
-        trustStore.revoke(ARTIFACT_KEY_ID);
+        governance.revokeKey(ARTIFACT_KEY_ID);
         AdmissionRecord record = service.submit(request);
         logDecision("key-revoked", record);
         assertEquals(RejectReason.KEY_REVOKED, record.decision().reason());
@@ -166,7 +168,7 @@ class AdmissionServiceTest {
     @Test
     void expiredKeyIsRejected() {
         AdmissionRequest request = validRequest();
-        trustStore.expire(ARTIFACT_KEY_ID);
+        governance.expireKey(ARTIFACT_KEY_ID);
         AdmissionRecord record = service.submit(request);
         logDecision("key-expired", record);
         assertEquals(RejectReason.KEY_EXPIRED, record.decision().reason());
@@ -177,7 +179,7 @@ class AdmissionServiceTest {
         // 轮换尚未生效（retiredAt 在未来）：旧密钥签发的签名仍有效
         AdmissionRequest beforeRotation = validRequest();
         KeyPair newKey = TestFixtures.generateKeyPair();
-        trustStore.rotate(ARTIFACT_KEY_ID,
+        governance.rotateKey(ARTIFACT_KEY_ID,
                 TestFixtures.trustedKey("artifact-key-2", newKey), Instant.now().plusSeconds(3600));
         AdmissionRecord oldButValid = service.submit(beforeRotation);
         logDecision("rotated-grace-valid", oldButValid);
@@ -185,7 +187,7 @@ class AdmissionServiceTest {
 
         // 轮换已生效（retiredAt 在过去）：旧密钥新签名被拒绝
         AdmissionRequest afterRotation = validRequest();
-        trustStore.rotate(ARTIFACT_KEY_ID,
+        governance.rotateKey(ARTIFACT_KEY_ID,
                 TestFixtures.trustedKey("artifact-key-3", TestFixtures.generateKeyPair()),
                 Instant.now().minusSeconds(3600));
         AdmissionRecord stale = service.submit(afterRotation);
@@ -195,7 +197,7 @@ class AdmissionServiceTest {
 
     @Test
     void missingPolicyFailsClosed() {
-        policyEngine.setPolicies(List.of());
+        governance.seedPolicies(List.of());
         AdmissionRecord record = service.submit(validRequest());
         logDecision("policy-missing", record);
         assertEquals(RejectReason.POLICY_MISSING, record.decision().reason());
@@ -203,7 +205,7 @@ class AdmissionServiceTest {
 
     @Test
     void conflictingPoliciesFailClosed() {
-        policyEngine.setPolicies(List.of(
+        governance.seedPolicies(List.of(
                 new TrustPolicy("p1", 10, "com\\.example\\..*", List.of(ARTIFACT_KEY_ID), null, true),
                 new TrustPolicy("p2", 10, "com\\.example\\..*", List.of(ARTIFACT_KEY_ID), null, true)));
         AdmissionRecord record = service.submit(validRequest());
@@ -213,7 +215,7 @@ class AdmissionServiceTest {
 
     @Test
     void policyReferencingUnknownKeyFailsClosed() {
-        policyEngine.setPolicies(List.of(new TrustPolicy(
+        governance.seedPolicies(List.of(new TrustPolicy(
                 "bad-ref", 10, null, List.of("ghost-key"), null, true)));
         AdmissionRecord record = service.submit(validRequest());
         logDecision("untrusted-key-ref", record);
@@ -223,7 +225,7 @@ class AdmissionServiceTest {
     @Test
     void signerNotAllowedIsRejected() {
         KeyPair outsider = TestFixtures.generateKeyPair();
-        trustStore.register(TestFixtures.trustedKey("outsider-key", outsider));
+        governance.registerKey(TestFixtures.trustedKey("outsider-key", outsider));
         AdmissionRequest request = TestFixtures.validRequest("com.example.app",
                 outsider, "outsider-key", provenanceKey, PROVENANCE_KEY_ID, BUILDER_ID);
         AdmissionRecord record = service.submit(request);
@@ -243,34 +245,41 @@ class AdmissionServiceTest {
     }
 
     @Test
-    void replayedProvenanceIsRejected() {
+    void replayedProvenanceIsAttributedToOriginalRecord() {
         AdmissionRequest first = validRequest();
         AdmissionRecord admitted = service.submit(first);
         assertEquals(AdmissionStatus.ADMITTED, admitted.status());
 
-        // 同一证明被绑定到另一制品再次提交：不得产生新的放行
+        // 情形一：同一 statementId 原样带着别的制品提交（绑定对不上，本应 NOT_BOUND）。
+        // 归属检查优先：直接归回原结论，连拒绝记录都不产生。
         AdmissionRequest second = validRequest();
-        AdmissionRequest replay = new AdmissionRequest(second.artifactId(), second.declaredDigest(),
-                second.contentBase64(), second.signatureBase64(), second.signerKeyId(), first.provenance());
-        AdmissionRecord replayed = service.submit(replay);
-        logDecision("provenance-replayed", replayed);
-        assertEquals(RejectReason.PROVENANCE_NOT_BOUND, replayed.decision().reason());
+        ProvenanceStatement foreign = first.provenance();
+        AdmissionRequest replay1 = new AdmissionRequest(second.artifactId(), second.declaredDigest(),
+                second.contentBase64(), second.signatureBase64(), second.signerKeyId(), foreign);
+        AdmissionRecord r1 = service.submit(replay1);
+        logDecision("provenance-replayed-foreign", r1);
+        assertEquals(admitted.recordId(), r1.recordId());
+        assertEquals(AdmissionStatus.ADMITTED, r1.status());
 
-        // 即使绑定关系被伪造一致，重放仍被拒绝
+        // 情形二：把同一 statementId 重新签名、伪造绑定到另一份制品（签名本身有效）。
+        // 仍然归回原结论，不产生新记录、不凭空放行。
         AdmissionRequest third = validRequest();
-        ProvenanceStatement reused = new ProvenanceStatement(first.provenance().statementId(),
-                third.artifactId(), third.declaredDigest(), BUILDER_ID,
-                first.provenance().issuedAtEpochSeconds(), PROVENANCE_KEY_ID,
-                TestFixtures.sign(provenanceKey.getPrivate(),
-                        new ProvenanceStatement(first.provenance().statementId(), third.artifactId(),
-                                third.declaredDigest(), BUILDER_ID,
-                                first.provenance().issuedAtEpochSeconds(), PROVENANCE_KEY_ID, null)
-                                .canonicalPayload()));
-        AdmissionRecord replayed2 = service.submit(new AdmissionRequest(third.artifactId(),
-                third.declaredDigest(), third.contentBase64(), third.signatureBase64(),
-                third.signerKeyId(), reused));
-        logDecision("provenance-replayed-bound", replayed2);
-        assertEquals(RejectReason.PROVENANCE_REPLAYED, replayed2.decision().reason());
+        long issuedAt = Instant.now().getEpochSecond();
+        String forgedSig = TestFixtures.sign(provenanceKey.getPrivate(),
+                new ProvenanceStatement(foreign.statementId(), third.artifactId(), third.declaredDigest(),
+                        BUILDER_ID, issuedAt, PROVENANCE_KEY_ID, null).canonicalPayload());
+        ProvenanceStatement rebound = new ProvenanceStatement(foreign.statementId(), third.artifactId(),
+                third.declaredDigest(), BUILDER_ID, issuedAt, PROVENANCE_KEY_ID, forgedSig);
+        AdmissionRequest replay2 = new AdmissionRequest(third.artifactId(), third.declaredDigest(),
+                third.contentBase64(), third.signatureBase64(), third.signerKeyId(), rebound);
+        AdmissionRecord r2 = service.submit(replay2);
+        logDecision("provenance-replayed-rebound", r2);
+        assertEquals(admitted.recordId(), r2.recordId());
+        assertEquals(AdmissionStatus.ADMITTED, r2.status());
+
+        // 两个“宿主”制品本身都未留下任何记录（重放归属不产生新记录）
+        assertTrue(store.findByRequestHash(AdmissionService.hashRequest(second)).isEmpty());
+        assertTrue(store.findByRequestHash(AdmissionService.hashRequest(third)).isEmpty());
     }
 
     @Test
@@ -320,7 +329,7 @@ class AdmissionServiceTest {
 
     @Test
     void oversizedBatchIsRejectedWholly() {
-        AdmissionService limited = newService(policyEngine, 2, 5000);
+        AdmissionService limited = newService(governance, store, 2, 5000);
         AdmissionService.BatchResult result = limited.submitBatch(
                 List.of(validRequest(), validRequest(), validRequest()));
         log.info("[batch-oversized] wholeBatchRejected={} detail={}",
@@ -331,7 +340,7 @@ class AdmissionServiceTest {
 
     @Test
     void exhaustedBatchBudgetRejectsRemainder() {
-        AdmissionService noTime = newService(policyEngine, 100, 0);
+        AdmissionService noTime = newService(governance, store, 100, 0);
         AdmissionService.BatchResult result = noTime.submitBatch(List.of(validRequest(), validRequest()));
         assertEquals(2, result.records().size());
         for (AdmissionRecord record : result.records()) {

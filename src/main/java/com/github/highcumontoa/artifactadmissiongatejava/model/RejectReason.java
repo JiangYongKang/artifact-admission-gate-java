@@ -12,7 +12,7 @@ public enum RejectReason {
     PROVENANCE_NOT_BOUND,
     /** 来源证明签名无效或证明者不被信任。 */
     PROVENANCE_UNTRUSTED,
-    /** 证明被重放（同一证明已产生过结论）。 */
+    /** 证明被重放（同一证明已产生过结论）；现行实现将挪用请求直接归回原记录，本值保留用于分类兼容。 */
     PROVENANCE_REPLAYED,
     /** 未配置任何适用策略，失败关闭。 */
     POLICY_MISSING,
@@ -31,5 +31,11 @@ public enum RejectReason {
     /** 制品标识不匹配策略约束。 */
     ARTIFACT_NOT_ALLOWED,
     /** 批量请求超过规模或耗时上限。 */
-    BATCH_LIMIT_EXCEEDED
+    BATCH_LIMIT_EXCEEDED,
+    /** 策略要求软件成分清单，但提交中未提供。 */
+    SBOM_MISSING,
+    /** 成分清单声明的制品标识/摘要与实际提交制品对不上。 */
+    SBOM_NOT_BOUND,
+    /** 成分清单中的组件不在策略允许范围内。 */
+    SBOM_COMPONENT_VIOLATION
 }

@@ -12,6 +12,7 @@ import java.time.Instant;
  * @param policyId        生效策略标识
  * @param signerKeyId     涉及的签名密钥标识
  * @param decidedAt       判定时间
+ * @param configVersion   判定所依据的治理配置版本（信任根+策略统一快照版本）
  */
 public record AdmissionDecision(
         AdmissionStatus status,
@@ -20,13 +21,18 @@ public record AdmissionDecision(
         String computedDigest,
         String policyId,
         String signerKeyId,
-        Instant decidedAt) {
+        Instant decidedAt,
+        long configVersion) {
 
-    public static AdmissionDecision admitted(String detail, String digest, String policyId, String keyId) {
-        return new AdmissionDecision(AdmissionStatus.ADMITTED, null, detail, digest, policyId, keyId, Instant.now());
+    public static AdmissionDecision admitted(String detail, String digest, String policyId, String keyId,
+                                             long configVersion) {
+        return new AdmissionDecision(AdmissionStatus.ADMITTED, null, detail, digest, policyId, keyId,
+                Instant.now(), configVersion);
     }
 
-    public static AdmissionDecision rejected(RejectReason reason, String detail, String digest, String policyId, String keyId) {
-        return new AdmissionDecision(AdmissionStatus.REJECTED, reason, detail, digest, policyId, keyId, Instant.now());
+    public static AdmissionDecision rejected(RejectReason reason, String detail, String digest, String policyId,
+                                             String keyId, long configVersion) {
+        return new AdmissionDecision(AdmissionStatus.REJECTED, reason, detail, digest, policyId, keyId,
+                Instant.now(), configVersion);
     }
 }
