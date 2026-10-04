@@ -21,8 +21,8 @@ public class AdmissionConfig {
     }
 
     @Bean
-    public GovernanceRegistry governanceRegistry() {
-        return new GovernanceRegistry();
+    public GovernanceRegistry governanceRegistry(Clock admissionClock) {
+        return new GovernanceRegistry(admissionClock);
     }
 
     @Bean

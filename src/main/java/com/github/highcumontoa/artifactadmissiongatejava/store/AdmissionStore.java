@@ -42,8 +42,20 @@ public class AdmissionStore {
         }
     }
 
+    /**
+     * 幂等归并判定：仅当两次判定的“判定依据”完全一致时才归并到既有记录。
+     * 判定依据 = 结论状态、拒绝原因、生效策略来源、签名密钥。
+     * 信任或策略变化后，只要其中任何一项发生变化（例如换用了更高优先级的策略、
+     * 签名密钥轮换），即使结论状态相同，也必须另起一条绑定新配置版本的修订记录，
+     * 绝不能把旧记录的策略来源与配置版本直接端回。
+     * 配置变化若不影响该制品的判定依据（如不匹配该制品的策略、无关密钥），
+     * 结论仍是同一条，归并保持幂等。
+     */
     private static boolean sameOutcome(AdmissionDecision a, AdmissionDecision b) {
-        return a.status() == b.status() && a.reason() == b.reason();
+        return a.status() == b.status()
+                && a.reason() == b.reason()
+                && java.util.Objects.equals(a.policyId(), b.policyId())
+                && java.util.Objects.equals(a.signerKeyId(), b.signerKeyId());
     }
 
     public Optional<AdmissionRecord> findById(String recordId) {

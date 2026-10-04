@@ -183,4 +183,72 @@ class ReevaluationTest {
         assertEquals(2, third.revision());
         logChain("no-stale-serve", third);
     }
+
+    @Test
+    void sameOutcomeUnderNewPolicySourceYieldsNewRevisionBoundToCurrentConfig() {
+        // 用户复现场景：放行后发布一份优先级更高、仍放行该制品的新策略，
+        // 完全相同的输入重提，结论必须绑定最新配置（新策略来源 + 新配置版本），
+        // 而不是把改动前那条记录端回来。
+        AdmissionRequest request = fixedRequest();
+        AdmissionRecord v1 = service.submit(request);
+        assertEquals(AdmissionStatus.ADMITTED, v1.status());
+        assertEquals("default-policy", v1.decision().policyId());
+        long v1Config = v1.decision().configVersion();
+
+        governance.publishPolicy(new TrustPolicy("newer-policy", 5, "com\\.example\\..*",
+                List.of(ARTIFACT_KEY_ID), List.of(BUILDER_ID), true));
+        long currentConfig = governance.current().version();
+        assertTrue(currentConfig > v1Config);
+
+        AdmissionRecord v2 = service.submit(request);
+        logChain("policy-source-changed-recheck", v2);
+        assertEquals(AdmissionStatus.ADMITTED, v2.status(), "outcome still admitted");
+        assertEquals(2, v2.revision(), "changed decision basis must open a new revision");
+        assertEquals(v1.recordId(), v2.supersedesRecordId());
+        assertEquals("newer-policy", v2.decision().policyId(),
+                "conclusion must name the currently effective policy, not the stale one");
+        assertEquals(currentConfig, v2.decision().configVersion(),
+                "conclusion must be bound to the latest config version");
+
+        // 旧历史记录保留、可查、不被改写
+        AdmissionRecord history = store.findById(v1.recordId()).orElseThrow();
+        assertEquals(AdmissionStatus.ADMITTED, history.status());
+        assertEquals("default-policy", history.decision().policyId());
+        assertEquals(v1Config, history.decision().configVersion());
+
+        // 同一配置下重复提交：幂等归并，不再产生新记录
+        AdmissionRecord again = service.submit(request);
+        logChain("same-config-resubmit", again);
+        assertEquals(v2.recordId(), again.recordId());
+        assertEquals(2, again.revision());
+        assertEquals(currentConfig, again.decision().configVersion());
+    }
+
+    @Test
+    void sameOutcomeUnderSamePolicyButRotatedSignerKeyYieldsNewRevision() {
+        // 策略来源不变但签名密钥轮换：判定依据变化，同样要起新修订
+        AdmissionRequest request = fixedRequest();
+        AdmissionRecord v1 = service.submit(request);
+        assertEquals(AdmissionStatus.ADMITTED, v1.status());
+
+        // 换一把密钥签名同一制品，并更新策略白名单（同 ID 替换）
+        KeyPair newArtifactKey = TestFixtures.generateKeyPair();
+        governance.registerKey(TestFixtures.trustedKey("artifact-key-2", newArtifactKey));
+        governance.publishPolicy(new TrustPolicy("default-policy", 10, "com\\.example\\..*",
+                List.of("artifact-key-2"), List.of(BUILDER_ID), true));
+        byte[] content = "fixed-artifact-content".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        String digest = com.github.highcumontoa.artifactadmissiongatejava.trust.CryptoSupport
+                .sha256Hex(content);
+        var provenance = TestFixtures.provenance("com.example.app", digest, BUILDER_ID,
+                provenanceKey, PROVENANCE_KEY_ID);
+        AdmissionRequest rekeyed = new AdmissionRequest("com.example.app", digest,
+                java.util.Base64.getEncoder().encodeToString(content),
+                TestFixtures.sign(newArtifactKey.getPrivate(), digest), "artifact-key-2", provenance);
+
+        AdmissionRecord v2 = service.submit(rekeyed);
+        logChain("signer-key-changed-recheck", v2);
+        assertEquals(AdmissionStatus.ADMITTED, v2.status());
+        assertEquals("artifact-key-2", v2.decision().signerKeyId());
+        assertTrue(v2.decision().configVersion() > v1.decision().configVersion());
+    }
 }
