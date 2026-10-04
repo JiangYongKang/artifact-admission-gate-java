@@ -45,8 +45,15 @@
 | `POLICY_ID_INVALID` | policyId 为空 |
 | `POLICY_PATTERN_INVALID` | artifactId / 组件名称正则无法编译 |
 | `POLICY_SELF_CONTRADICTION` | 空签名者白名单（禁止一切签名者）；要求证明却禁止所有 builder；要求清单却禁止所有组件 |
-| `POLICY_KEY_NOT_TRUSTED` | 策略引用的密钥当前不在信任库 |
+| `POLICY_KEY_NOT_TRUSTED` | 策略引用的密钥从未注册（不在信任库） |
+| `POLICY_KEY_REVOKED` | 策略引用的密钥已注册但当前已被撤销 |
+| `POLICY_KEY_EXPIRED` | 策略引用的密钥已注册但当前已过期（显式置为过期或已超过 notAfter） |
 | `POLICY_CONFLICT_AT_PUBLISH` | 与共存策略同优先级且制品范围必然重叠（pattern 相同），运行期将永远冲突 |
+
+“不受信任”按**发布时刻**的信任状态判定：仅存在注册记录不够，已撤销、已过期的密钥同样
+拦住（含“先注册并正常使用、运行期再撤销/过期，之后发布引用它的新策略”这一路径）。
+被拦的发布整次不发生：配置版本不推进、快照与已生效策略不变，治理状态保持发布前原样。
+轮换退役（RETIRED）的密钥仍可按宽限规则验证退役前签发的签名，发布期不拦截。
 
 校验只基于“发布后将生效的新状态”（同 ID 旧策略视为被替换），因此发布要么整体成功，要么整体不发生。
 
@@ -71,10 +78,14 @@
 ## 结论复核与修订链
 
 - 提交始终按**当前最新快照**重新执行完整校验流水线，从不读取旧结论直接返回。
-- 结论（`status` + `reason`）与链头一致 → 归并为同一条记录（重复提交幂等、并发提交只有一条记录）。
-- 结论发生变化 → 原子追加 `revision+1` 的新记录，`supersedesRecordId` 指向被取代的旧记录；
-  旧记录仍可按 `recordId` 查询，`GET /api/admissions/{recordId}` 永远返回写入时的历史结论；
-  按请求哈希则始终解析到**最新**修订。
+- **信任或策略发生任何变化（configVersion 推进）后**，同一请求重提一律按最新配置重新判定并
+  追加 `revision+1` 的新记录（`supersedesRecordId` 串联）：即使结论同为放行/同为拒绝，
+  返回的结论也绑定判定时的策略来源与 `configVersion`，绝不把旧记录里的旧策略来源、
+  旧配置版本端回。
+- 仅在**结论与配置版本都与链头一致**时归并为同一条记录：同一配置下重复提交幂等，
+  并发提交只有一条记录，不会出现互相矛盾的两条结论。
+- 旧记录仍可按 `recordId` 查询，`GET /api/admissions/{recordId}` 永远返回写入时的历史结论，
+  历史记录不被改写；按请求哈希则始终解析到**最新**修订。
 - 每条判定结论带 `configVersion`，标明它依据的是哪一版信任根+策略。
 
 ### 重放归属
@@ -123,22 +134,51 @@
 - 旧的 6 参 `TrustPolicy` 与无 `manifest` 的 `AdmissionRequest` 构造仍然保留，旧调用方无需改动。
 - 原有用例（摘要/签名/证明、轮换宽限、失败关闭、幂等、批量、并发一致）全部保留并通过。
 - 信任与策略默认空（失败关闭）；可通过治理接口或测试引导（`seedPolicies`）装入配置。
+- 行为收紧说明（本轮起生效）：
+  - 发布期对密钥引用的拦截从“从未注册”扩展到“已撤销 / 已过期”，分别返回
+    `POLICY_KEY_REVOKED` / `POLICY_KEY_EXPIRED`（HTTP 422），原 `POLICY_KEY_NOT_TRUSTED`
+    仅表示从未注册；
+  - 结论复核的归并条件从“结论相同”收紧为“结论相同且配置版本相同”：配置变化后重提
+    会得到一条绑定最新配置的新修订，而不是沿用旧记录。按 `recordId` 查询历史结论的行为不变。
 
 ## 本地复现与验证
 
 ```bash
-mvn -o test              # 离线运行全部测试（40 个用例）
+mvn -o test              # 离线运行全部测试（44 个用例）
 mvn -o spring-boot:run   # 本地启动服务，再用 curl 调 /api/governance 与 /api/admissions
+```
+
+手工复现两处关键场景（服务启动后）：
+
+```bash
+# 1) 发布期拦截已撤销密钥：注册密钥 → 发布并使用策略 → 撤销密钥 → 再发布引用它的新策略
+curl -X POST localhost:8080/api/governance/keys -H 'Content-Type: application/json' -d '{"keyId":"k1","publicKeyBase64":"<X.509 Base64>"}'
+curl -X POST localhost:8080/api/governance/policies -H 'Content-Type: application/json' \
+     -d '{"policyId":"p1","priority":10,"artifactIdPattern":"com\\.example\\..*","allowedSignerKeyIds":["k1"]}'
+curl -X POST localhost:8080/api/governance/keys/k1/revoke
+curl -X POST localhost:8080/api/governance/policies -H 'Content-Type: application/json' \
+     -d '{"policyId":"p2","priority":5,"artifactIdPattern":"com\\.example\\..*","allowedSignerKeyIds":["k1"]}'
+# 期望：422 {"code":"POLICY_KEY_REVOKED"}；GET /api/governance/snapshot 中无 p2，configVersion 不变
+
+# 2) 配置变化后复核绑定最新配置：提交制品放行 → 发布更高优先级策略 → 相同输入重提
+# 期望：返回记录的 policyId/configVersion 为新策略与新版本，revision 递增；
+#       GET /api/admissions/{旧recordId} 仍返回历史结论
 ```
 
 测试覆盖（新增部分）：
 
 - 运行期发布/替换/下线策略即时生效、发布期拦截矛盾策略与未知密钥引用、失败发布不改版本；
   并发写治理 + 并发读快照，验证读者只能看到完整一致的快照；
+- **发布期拦截已撤销 / 已过期（含超过 notAfter）密钥引用的策略**：返回可区分的
+  `POLICY_KEY_REVOKED` / `POLICY_KEY_EXPIRED`，失败发布不推进配置版本、不改变治理状态，
+  原生效策略不受影响；
 - 成分清单缺失、artifactId 不绑定、摘要不绑定、组件越权、可选清单仍受校验；
 - 密钥撤销/过期、更高优先级策略发布、策略下线后同一制品重提产生新结论与修订链；
-  无关配置变更但结论不变时归并为同一条记录；旧放行记录绝不被直接端回；
+  **配置变化后即使结论不变，重提也得到绑定最新策略来源与配置版本的新修订**；
+  同一配置下重复提交保持幂等归并；旧放行记录绝不被直接端回，历史记录可查不被改写；
 - 同一条证明挪用至别的制品（原样与重签伪造绑定两种）均归回原记录、不产生新记录；
+- **并发撤销/发布/提交风暴**：任何依据撤销后配置作出的判定绝不放行；同一配置版本下
+  结论绝不互相矛盾；被拦发布不留半成品（版本只随成功写操作推进）；
 - HTTP 端到端：治理 → 准入（含清单）→ 撤销 → 复核的完整链路。
 
 每个用例日志均打印**输入摘要与判定依据**（`digest=... reason=... configVersion=... basis=...`），

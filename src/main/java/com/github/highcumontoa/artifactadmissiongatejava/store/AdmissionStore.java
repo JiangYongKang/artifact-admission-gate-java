@@ -11,8 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * 线程安全的准入记录存储。
  *
  * 每个请求哈希对应一条“修订链”：首次提交产生 revision=1 的记录；配置（信任根/策略）变化后
- * 同一请求再次提交，若结论发生变化则原子追加 revision+1 的新记录并以 supersedesRecordId 串联；
- * 若结论不变则归并为既有记录（保证重复提交幂等、并发提交只有一条记录）。
+ * 同一请求再次提交，一律按最新配置重新判定并原子追加 revision+1 的新记录（supersedesRecordId
+ * 串联），结论绑定判定时的配置版本，绝不把旧配置下录得的策略来源/配置版本端回；
+ * 仅当结论与配置版本都与链头一致时才归并（保证同一配置下重复提交幂等、并发提交只有一条记录）。
  * 每条记录一旦写入即不可变；findByRequestHash 永远返回链上的最新结论。
  */
 public class AdmissionStore {
@@ -22,14 +23,16 @@ public class AdmissionStore {
     private final Object commitLock = new Object();
 
     /**
-     * 提交一个判定结论：与当前最新结论一致则归并返回既有记录，否则原子追加修订版。
+     * 提交一个判定结论：与链头结论一致且依据同一配置版本则归并返回既有记录，
+     * 否则原子追加修订版（配置已变化时即使结论相同也追加，使结论始终绑定当前配置）。
      * 先写记录再发布索引，保证任何读者经索引取到的记录绝不缺失。
      */
     public AdmissionRecord commit(String requestHash, String artifactId, AdmissionDecision decision) {
         synchronized (commitLock) {
             String headId = headByRequestHash.get(requestHash);
             AdmissionRecord head = headId == null ? null : byId.get(headId);
-            if (head != null && sameOutcome(head.decision(), decision)) {
+            if (head != null && sameOutcome(head.decision(), decision)
+                    && head.decision().configVersion() == decision.configVersion()) {
                 return head;
             }
             int revision = head == null ? 1 : head.revision() + 1;

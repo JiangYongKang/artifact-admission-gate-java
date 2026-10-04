@@ -6,6 +6,7 @@ import com.github.highcumontoa.artifactadmissiongatejava.trust.TrustedKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,9 +29,15 @@ public class GovernanceRegistry {
     private final Map<String, TrustedKey> keys = new LinkedHashMap<>();
     private final Map<String, TrustPolicy> policiesById = new LinkedHashMap<>();
     private final AtomicLong versionSeq = new AtomicLong(0);
+    private final Clock clock;
     private volatile GovernanceSnapshot current = new GovernanceSnapshot(0, Map.of(), List.of());
 
     public GovernanceRegistry() {
+        this(Clock.systemUTC());
+    }
+
+    public GovernanceRegistry(Clock clock) {
+        this.clock = clock;
     }
 
     public GovernanceSnapshot current() {
@@ -86,7 +93,8 @@ public class GovernanceRegistry {
 
     /**
      * 发布（新增或同 ID 替换）一份策略。
-     * 自相矛盾、非法正则或引用当前未受信密钥时抛出 {@link PolicyPublicationException}，状态不变。
+     * 自相矛盾、非法正则或引用当前未受信密钥（未注册/已撤销/已过期）时
+     * 抛出 {@link PolicyPublicationException}，状态不变。
      */
     public synchronized void publishPolicy(TrustPolicy policy) {
         List<TrustPolicy> others = new ArrayList<>();
@@ -95,7 +103,7 @@ public class GovernanceRegistry {
                 others.add(existing);
             }
         }
-        PolicyGovernance.validate(policy, others, keys::containsKey);
+        PolicyGovernance.validate(policy, others, keys::get, clock.instant());
         policiesById.put(policy.policyId(), policy);
         publish("policy published: " + policy.policyId() + " priority=" + policy.priority());
     }

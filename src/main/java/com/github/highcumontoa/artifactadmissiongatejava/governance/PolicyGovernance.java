@@ -1,13 +1,18 @@
 package com.github.highcumontoa.artifactadmissiongatejava.governance;
 
 import com.github.highcumontoa.artifactadmissiongatejava.policy.TrustPolicy;
+import com.github.highcumontoa.artifactadmissiongatejava.trust.TrustedKey;
 
+import java.time.Instant;
 import java.util.List;
-import java.util.function.Predicate;
+import java.util.function.Function;
 
 /**
  * 策略发布期校验：在策略进入治理状态之前挡住自相矛盾、非法正则、
  * 以及引用当前不受信任密钥的策略。校验无副作用，失败时治理状态保持不变。
+ *
+ * “不受信任”覆盖三种情形：密钥从未注册、已注册但被撤销、已注册但已过期
+ * （显式置为过期或已超过 notAfter）。仅存在注册记录不足以视为受信。
  */
 public final class PolicyGovernance {
 
@@ -19,10 +24,12 @@ public final class PolicyGovernance {
      *
      * @param candidate 待发布策略
      * @param others    发布后与之共存的其他策略（同 ID 的旧策略将被替换，已排除）
-     * @param keyExists 当前信任快照中是否存在某密钥
+     * @param keyLookup 当前信任快照中的密钥查询（不存在返回 null）
+     * @param now       判定时刻（用于 notAfter 过期判断）
      * @throws PolicyPublicationException 校验失败（code 为机器可读分类）
      */
-    public static void validate(TrustPolicy candidate, List<TrustPolicy> others, Predicate<String> keyExists) {
+    public static void validate(TrustPolicy candidate, List<TrustPolicy> others,
+                                Function<String, TrustedKey> keyLookup, Instant now) {
         if (candidate.policyId() == null || candidate.policyId().isBlank()) {
             throw new PolicyPublicationException("POLICY_ID_INVALID", "policyId must not be blank");
         }
@@ -49,12 +56,22 @@ public final class PolicyGovernance {
                     "policy " + candidate.policyId()
                             + " requires a manifest but forbids every component; requirement is unsatisfiable");
         }
-        // 引用当前不受信任的密钥：发布期即挡住，而不是等请求进来才失败
+        // 引用当前不受信任的密钥：发布期即挡住，而不是等请求进来才失败。
+        // 覆盖从未注册、已撤销、已过期三种情形，分别给出可区分的失败 code。
         if (candidate.allowedSignerKeyIds() != null) {
             for (String keyId : candidate.allowedSignerKeyIds()) {
-                if (!keyExists.test(keyId)) {
+                TrustedKey key = keyLookup.apply(keyId);
+                if (key == null) {
                     throw new PolicyPublicationException("POLICY_KEY_NOT_TRUSTED",
                             "policy " + candidate.policyId() + " references key absent from trust store: " + keyId);
+                }
+                if (key.isRevoked()) {
+                    throw new PolicyPublicationException("POLICY_KEY_REVOKED",
+                            "policy " + candidate.policyId() + " references revoked key: " + keyId);
+                }
+                if (key.isExpiredAt(now)) {
+                    throw new PolicyPublicationException("POLICY_KEY_EXPIRED",
+                            "policy " + candidate.policyId() + " references expired key: " + keyId);
                 }
             }
         }

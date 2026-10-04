@@ -113,11 +113,31 @@ class AdmissionApiIntegrationTest {
                 rechecked.get("decision").get("reason").asText());
         org.junit.jupiter.api.Assertions.assertEquals(2, rechecked.get("revision").asInt());
 
-        // 6. 快照查询可见密钥已撤销
-        mvc.perform(get("/api/governance/snapshot"))
+        // 6. 撤销后发布引用该密钥的新策略 → 422 POLICY_KEY_REVOKED，治理状态与配置版本不变
+        String snapBefore = mvc.perform(get("/api/governance/snapshot"))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        long versionBefore = MAPPER.readTree(snapBefore).get("configVersion").asLong();
+        JsonNode revokedRef = postJson("/api/governance/policies", Map.of(
+                "policyId", "late-policy-" + UUID.randomUUID(), "priority", 1,
+                "artifactIdPattern", "http-late\\..*",
+                "allowedSignerKeyIds", List.of(aKeyId),
+                "requireProvenance", false), 422);
+        org.junit.jupiter.api.Assertions.assertEquals("POLICY_KEY_REVOKED",
+                revokedRef.get("code").asText());
+        log.info("[http-publish-revoked-key] code={} detail={}",
+                revokedRef.get("code").asText(), revokedRef.get("detail").asText());
+
+        // 7. 快照查询：密钥已撤销、配置版本未因失败发布而推进、被拦策略不在快照中
+        String snapAfter = mvc.perform(get("/api/governance/snapshot"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.keys[?(@.keyId=='" + aKeyId + "')].state").value(
-                        org.hamcrest.Matchers.hasItem("REVOKED")));
+                        org.hamcrest.Matchers.hasItem("REVOKED")))
+                .andReturn().getResponse().getContentAsString();
+        JsonNode snap = MAPPER.readTree(snapAfter);
+        org.junit.jupiter.api.Assertions.assertEquals(versionBefore, snap.get("configVersion").asLong(),
+                "failed publish must not bump configVersion");
+        org.junit.jupiter.api.Assertions.assertFalse(snap.get("policies").toString().contains("late-policy"),
+                "rejected policy must not appear in snapshot");
     }
 
     @Test

@@ -151,21 +151,75 @@ class ReevaluationTest {
     }
 
     @Test
-    void unrelatedConfigBumpKeepsSameConclusionAndRecord() {
+    void configBumpRebindsConclusionToLatestConfigEvenWhenOutcomeUnchanged() {
         AdmissionRequest request = fixedRequest();
         AdmissionRecord v1 = service.submit(request);
+        assertEquals(AdmissionStatus.ADMITTED, v1.status());
 
-        // 注册一把无关的新密钥、发布一份不匹配该制品的策略：配置版本递增但结论不变
+        // 注册一把无关的新密钥、发布一份不匹配该制品的策略：配置版本递增，判定结论不变
         KeyPair extra = TestFixtures.generateKeyPair();
         governance.registerKey(TestFixtures.trustedKey("extra-key", extra));
         governance.publishPolicy(new TrustPolicy("unrelated-policy", 1, "org\\.other\\..*",
                 List.of("extra-key"), null, false));
+        long latestVersion = governance.current().version();
 
+        // 结论虽同为放行，但必须按最新配置重新判定并落一条绑定新配置版本的新修订，
+        // 绝不能把旧记录里的旧配置版本端回
+        AdmissionRecord v2 = service.submit(request);
+        logChain("config-bump-rebind", v2);
+        assertEquals(AdmissionStatus.ADMITTED, v2.status());
+        assertNotEquals(v1.recordId(), v2.recordId(), "config changed: must not serve the old record");
+        assertEquals(2, v2.revision());
+        assertEquals(v1.recordId(), v2.supersedesRecordId());
+        assertEquals(latestVersion, v2.decision().configVersion(),
+                "conclusion must be bound to the config version it was decided under");
+        assertTrue(v2.decision().configVersion() > v1.decision().configVersion());
+
+        // 旧记录仍可按 recordId 查询，历史结论不被改写
+        AdmissionRecord history = store.findById(v1.recordId()).orElseThrow();
+        assertEquals(AdmissionStatus.ADMITTED, history.status());
+        assertEquals(v1.decision().configVersion(), history.decision().configVersion());
+
+        // 同一配置下再次重复提交：幂等归并，仍是同一条记录
         AdmissionRecord again = service.submit(request);
-        logChain("unrelated-change-recheck", again);
-        assertEquals(AdmissionStatus.ADMITTED, again.status());
-        assertEquals(v1.recordId(), again.recordId(), "unchanged conclusion must merge into the same record");
-        assertEquals(1, again.revision());
+        assertEquals(v2.recordId(), again.recordId(), "same config + same outcome must merge");
+        assertEquals(2, again.revision());
+    }
+
+    @Test
+    void sameOutcomeResubmissionBindsLatestPolicySourceAndConfigVersion() {
+        AdmissionRequest request = fixedRequest();
+        AdmissionRecord v1 = service.submit(request);
+        assertEquals(AdmissionStatus.ADMITTED, v1.status());
+        assertEquals("default-policy", v1.decision().policyId());
+        long v1Config = v1.decision().configVersion();
+
+        // 发布一份优先级更高、仍然适用于该制品且同样放行的新策略（结论不变，策略来源变了）
+        governance.publishPolicy(new TrustPolicy("preferred-policy", 5, "com\\.example\\..*",
+                List.of(ARTIFACT_KEY_ID), List.of(BUILDER_ID), true));
+        long latestVersion = governance.current().version();
+
+        // 完全相同的输入重提：结论必须绑定最新配置，绝不能端回旧记录里的旧策略来源/旧配置版本
+        AdmissionRecord v2 = service.submit(request);
+        logChain("same-outcome-rebind", v2);
+        assertEquals(AdmissionStatus.ADMITTED, v2.status());
+        assertNotEquals(v1.recordId(), v2.recordId(), "config changed: old record must not be served");
+        assertEquals(2, v2.revision());
+        assertEquals(v1.recordId(), v2.supersedesRecordId());
+        assertEquals("preferred-policy", v2.decision().policyId(),
+                "conclusion must reflect the policy actually applied at re-decision time");
+        assertEquals(latestVersion, v2.decision().configVersion());
+        assertTrue(v2.decision().configVersion() > v1Config);
+
+        // 旧历史记录仍可查、不被改写
+        AdmissionRecord history = store.findById(v1.recordId()).orElseThrow();
+        assertEquals("default-policy", history.decision().policyId());
+        assertEquals(v1Config, history.decision().configVersion());
+
+        // 同一配置下重复提交：幂等归并为同一条记录
+        AdmissionRecord again = service.submit(request);
+        assertEquals(v2.recordId(), again.recordId());
+        assertEquals(2, again.revision());
     }
 
     @Test
